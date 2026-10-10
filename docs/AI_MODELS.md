@@ -30,6 +30,6 @@ Run 10 real campus photos through the pipeline on laptop and phone. Record: load
 ## Final choices (fill in)
 | Role | Model | Size | License | Notes |
 |---|---|---|---|---|
-| Vision ID | | | | |
+| Vision ID | Xenova/clip-vit-base-patch32 (fallback: onnx-community/clip-vit-base-patch32), dtype q8, WASM | verify (several hundred MB incl. text encoder) | verify on model card (CLIP is MIT) | Loaded by `inference.worker.ts`; unverified from CI sandbox - confirm on first real run |
 | Quest text (optional) | | | | |
 | Audio (optional) | | | | |

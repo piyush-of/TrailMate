@@ -1,142 +1,98 @@
-import { pipeline, env, type Pipeline } from '@huggingface/transformers';
-import { CampusLabel, ClassificationResult, DiscoveryCategory } from '../types';
+import { pipeline, env } from '@huggingface/transformers';
+import type { CampusLabel } from '../types';
+import { DISTRACTOR_PROMPTS, interpretScores, promptFor, type RawScore } from '../features/identify/interpret';
 
-// Configure transformers.js for browser worker environment
+// Self-hosted ONNX runtime files. `?url` makes Vite serve them in dev and emit hashed copies in
+// production (precached by the service worker), so nothing is fetched from a CDN. Relative paths are
+// used because onnxruntime-web's package "exports" don't expose /dist/*.
+import ortMjsUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs?url';
+import ortWasmUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?url';
+
+// Everything must work offline: models come from the browser Cache API after the first download.
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+if (env.backends.onnx.wasm) {
+  env.backends.onnx.wasm.wasmPaths = { mjs: ortMjsUrl, wasm: ortWasmUrl };
+}
 
-let classifier: Pipeline | null = null;
-let labelsCache: CampusLabel[] = [];
+// Verify the ID/license before publishing (see docs/AI_MODELS.md). Add more IDs here to try fallbacks.
+const MODEL_CANDIDATES = ['Xenova/clip-vit-base-patch32'];
 
-const DEFAULT_THRESHOLD = 0.35;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let classifier: any = null;
+let loading: Promise<void> | null = null;
 
-self.addEventListener('message', async (e: MessageEvent) => {
-  const { type, payload } = e.data;
+const post = (msg: unknown) => self.postMessage(msg);
 
-  switch (type) {
-    case 'INIT_LABELS': {
-      labelsCache = payload.labels;
-      self.postMessage({ type: 'LABELS_INITIALIZED', count: labelsCache.length });
-      break;
+function makeProgressCallback() {
+  const files = new Map<string, { loaded: number; total: number }>();
+  return (p: { status: string; file?: string; loaded?: number; total?: number }) => {
+    if (p.status === 'progress' && p.file && p.total) {
+      files.set(p.file, { loaded: p.loaded ?? 0, total: p.total });
+      let loaded = 0;
+      let total = 0;
+      files.forEach((f) => {
+        loaded += f.loaded;
+        total += f.total;
+      });
+      const progress = total ? Math.min(99, Math.round((loaded / total) * 100)) : 0;
+      post({ type: 'PROGRESS', progress, status: `Downloading AI model: ${progress}%` });
     }
-
-    case 'LOAD_MODEL': {
-      try {
-        self.postMessage({ type: 'PROGRESS', status: 'Checking model cache...', progress: 10 });
-
-        // Using small quantized CLIP model for mobile compatibility
-        classifier = await (pipeline as any)('zero-shot-image-classification', 'onnx-community/clip-vit-base-patch32', {
-          device: 'wasm',
-          dtype: 'q8',
-          progress_callback: (p: { status: string; progress?: number }) => {
-            if (p.progress !== undefined) {
-              self.postMessage({
-                type: 'PROGRESS',
-                status: `Downloading AI model: ${Math.round(p.progress)}%`,
-                progress: Math.round(p.progress),
-              });
-            }
-          },
-        });
-
-        self.postMessage({ type: 'READY' });
-      } catch (err: unknown) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        self.postMessage({
-          type: 'ERROR',
-          error: `Model load fallback active: ${errorMsg}`,
-          canFallback: true,
-        });
-      }
-      break;
-    }
-
-    case 'CLASSIFY_IMAGE': {
-      const { imageUrl, labels } = payload;
-      const targetLabels: CampusLabel[] = labels || labelsCache;
-
-      try {
-        if (!classifier) {
-          // Fallback heuristic classifier for offline testing or when model isn't yet cached
-          const fallbackResult = runFallbackClassifier(targetLabels);
-          self.postMessage({ type: 'RESULT', result: fallbackResult });
-          return;
-        }
-
-        const candidatePrompts = targetLabels.map((l) => `a photo of a ${l.label.toLowerCase()}`);
-        
-        // Run CLIP zero-shot classification
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawOutput: any = await (classifier as any)(imageUrl, candidatePrompts);
-
-        // Normalize output to our campus labels
-        const scored = rawOutput.map((item: { label: string; score: number }) => {
-          const matchedLabel = targetLabels.find(
-            (l) => `a photo of a ${l.label.toLowerCase()}` === item.label
-          ) || targetLabels[0];
-
-          return {
-            label: matchedLabel.label,
-            category: matchedLabel.category,
-            confidence: Math.round(item.score * 100) / 100,
-          };
-        });
-
-        scored.sort((a: { confidence: number }, b: { confidence: number }) => b.confidence - a.confidence);
-
-        const top1 = scored[0];
-        const isConfident = top1.confidence >= DEFAULT_THRESHOLD;
-
-        const result: ClassificationResult = {
-          label: isConfident ? top1.label : 'Unknown Object',
-          category: top1.category as DiscoveryCategory,
-          confidence: top1.confidence,
-          isConfident,
-          alternatives: scored.slice(1, 4),
-        };
-
-        self.postMessage({ type: 'RESULT', result });
-      } catch (classifyErr: unknown) {
-        // Honest AI fallback
-        const fallback = runFallbackClassifier(targetLabels);
-        self.postMessage({ type: 'RESULT', result: fallback });
-      }
-      break;
-    }
-
-    default:
-      console.warn('Unknown worker message type:', type);
-  }
-});
-
-/**
- * Deterministic fallback simulator for testing or when model is offline before first cache.
- */
-function runFallbackClassifier(labels: CampusLabel[]): ClassificationResult {
-  if (labels.length === 0) {
-    return {
-      label: 'Unknown',
-      category: 'other',
-      confidence: 0.25,
-      isConfident: false,
-    };
-  }
-
-  // Select a natural candidate for the demo
-  const sample = labels[Math.floor(Math.random() * labels.length)];
-  const confidence = 0.58 + Math.random() * 0.35; // 0.58 - 0.93
-
-  return {
-    label: sample.label,
-    category: sample.category,
-    confidence: Math.round(confidence * 100) / 100,
-    isConfident: confidence >= DEFAULT_THRESHOLD,
-    alternatives: labels
-      .filter((l) => l.id !== sample.id)
-      .slice(0, 3)
-      .map((l) => ({
-        label: l.label,
-        confidence: Math.round(Math.max(0.1, 1 - confidence - 0.1) * 100) / 100,
-      })),
   };
 }
+
+async function loadModel() {
+  if (classifier) return;
+  if (loading) return loading;
+  loading = (async () => {
+    post({ type: 'PROGRESS', progress: 1, status: 'Preparing AI model...' });
+    const errors: string[] = [];
+    for (const id of MODEL_CANDIDATES) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        classifier = await (pipeline as any)('zero-shot-image-classification', id, {
+          device: 'wasm',
+          dtype: 'q8',
+          progress_callback: makeProgressCallback(),
+        });
+        post({ type: 'READY', model: id });
+        return;
+      } catch (err) {
+        errors.push(`${id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // Report every failure (not just the last) so the real cause isn't hidden by a fallback's error
+    post({ type: 'ERROR', error: `Could not load the AI model. ${errors.join(' | ')}` });
+  })().finally(() => {
+    loading = null;
+  });
+  return loading;
+}
+
+self.addEventListener('message', async (e: MessageEvent) => {
+  const msg = e.data;
+
+  if (msg.type === 'LOAD_MODEL') {
+    await loadModel();
+    return;
+  }
+
+  if (msg.type === 'CLASSIFY') {
+    const { id, imageUrl, labels } = msg as { id: number; imageUrl: string; labels: CampusLabel[] };
+    if (!classifier) {
+      // Never invent a result: tell the UI honestly that the model isn't available.
+      post({ type: 'CLASSIFY_ERROR', id, error: 'AI model is not loaded yet.' });
+      return;
+    }
+    try {
+      const candidates = [...labels.map(promptFor), ...DISTRACTOR_PROMPTS];
+      const raw: RawScore[] = await classifier(imageUrl, candidates, {
+        // The pipeline default is "This is a photo of {}" - pass raw labels + our own template.
+        hypothesis_template: 'a photo of a {}',
+      });
+      post({ type: 'RESULT', id, result: interpretScores(raw, labels) });
+    } catch (err) {
+      post({ type: 'CLASSIFY_ERROR', id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+});

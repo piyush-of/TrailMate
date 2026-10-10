@@ -85,3 +85,11 @@ export function calculateTrackDistance(points: GpsPoint[]): number {
   }
   return Math.round(total);
 }
+
+/**
+ * Stationary GPS drifts by several metres. Ignore movement smaller than a fraction of the
+ * reported accuracy (min 3 m, max 7.5 m) so standing still doesn't add phantom distance.
+ */
+export function minMovementFor(accuracyM: number): number {
+  return Math.max(3, Math.min(accuracyM, 15) / 2);
+}

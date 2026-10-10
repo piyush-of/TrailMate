@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Mood, Difficulty, PlannedMinutes } from '../../types';
 import { Compass, Sparkles, Flame, Clock, ShieldCheck, Sun } from 'lucide-react';
+import { OfflinePackCard } from '../identify/OfflinePackCard';
 
 interface QuestSetupProps {
   onStartQuest: (mood: Mood, difficulty: Difficulty, minutes: PlannedMinutes) => void;
@@ -39,6 +40,8 @@ export const QuestSetup: React.FC<QuestSetupProps> = ({ onStartQuest, isOffline 
           Pick your time and vibe. We'll generate a real-world outdoor quest for your campus walk.
         </p>
       </div>
+
+      <OfflinePackCard />
 
       {/* Duration Selector */}
       <div className="flex flex-col gap-2">

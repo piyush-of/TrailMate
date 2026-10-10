@@ -1,4 +1,4 @@
-import { XpEvent, LevelInfo, BadgeDefinition, Adventure, Discovery } from '../../types';
+import { XpEvent, LevelInfo, BadgeDefinition, Adventure, Discovery, QuestItem } from '../../types';
 
 export const LEVEL_THRESHOLDS = [
   { level: 1, title: 'Grass Starter', minXp: 0 },
@@ -47,29 +47,69 @@ export const BADGE_DEFINITIONS: Record<string, BadgeDefinition> = {
   },
 };
 
+export const DAILY_XP_CAP = 500;
+
+/** Local calendar day (YYYY-MM-DD) - the day boundary users actually experience. */
+export function localDayKey(ts: number): string {
+  const d = new Date(ts);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 /**
- * Derives total XP from immutable append-only event stream.
- * Applies sanity cap of 500 XP per calendar day.
+ * Derives total XP from the immutable append-only event stream.
+ * Events are applied in time order and capped at 500 XP per local calendar day.
  */
 export function deriveTotalXp(events: XpEvent[]): number {
   if (events.length === 0) return 0;
 
-  // Group events by local date string YYYY-MM-DD
   const dailyTotals = new Map<string, number>();
+  const ordered = [...events].sort((a, b) => a.at - b.at);
 
-  for (const event of events) {
-    const dateKey = new Date(event.at).toISOString().split('T')[0];
-    const currentDayTotal = dailyTotals.get(dateKey) || 0;
-    const allowedRemaining = Math.max(0, 500 - currentDayTotal);
-    const added = Math.min(event.xp, allowedRemaining);
-    dailyTotals.set(dateKey, currentDayTotal + added);
+  for (const event of ordered) {
+    const key = localDayKey(event.at);
+    const current = dailyTotals.get(key) || 0;
+    const allowed = Math.max(0, DAILY_XP_CAP - current);
+    dailyTotals.set(key, current + Math.min(Math.max(0, event.xp), allowed));
   }
 
   let grandTotal = 0;
-  for (const total of dailyTotals.values()) {
-    grandTotal += total;
-  }
+  dailyTotals.forEach((t) => (grandTotal += t));
   return grandTotal;
+}
+
+/** Raw XP logged for one adventure (before the daily cap) - used for the recap screen. */
+export function sumXpForAdventure(events: XpEvent[], adventureId: string): number {
+  return events.filter((e) => e.adventureId === adventureId).reduce((sum, e) => sum + e.xp, 0);
+}
+
+export const MIN_REWARD_DURATION_MIN = 2;
+
+/**
+ * XP events earned when an adventure is finished (start + discovery XP are logged separately).
+ * Sanity checks: quest/challenge XP needs a minimum duration, "quest complete" needs every item done.
+ */
+export function computeFinishXpEvents(input: {
+  quest: QuestItem[];
+  distanceM: number;
+  durationMinutes: number;
+}): Array<{ kind: string; xp: number }> {
+  const events: Array<{ kind: string; xp: number }> = [];
+  const { quest, distanceM, durationMinutes } = input;
+  const plausible = durationMinutes >= MIN_REWARD_DURATION_MIN;
+
+  const done = quest.filter((q) => q.done).length;
+  if (plausible && done > 0) events.push({ kind: 'challenge_done', xp: done * 20 });
+  if (plausible && quest.length > 0 && done === quest.length) events.push({ kind: 'quest_complete', xp: 50 });
+
+  const steps = Math.min(20, Math.floor(distanceM / 500));
+  if (steps > 0) events.push({ kind: 'distance', xp: steps * 10 });
+
+  if (durationMinutes >= 60) events.push({ kind: 'time_60m', xp: 75 });
+  else if (durationMinutes >= 30) events.push({ kind: 'time_30m', xp: 30 });
+
+  return events;
 }
 
 /**

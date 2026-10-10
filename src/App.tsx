@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, logXpEvent } from './lib/db';
+import { db, logXpEvent, logXpEvents, uid, getResumableAdventure } from './lib/db';
 import { Adventure, Mood, Difficulty, PlannedMinutes } from './types';
 import { generateQuest } from './features/quest/questGenerator';
-import { deriveTotalXp, deriveLevel, evaluateBadges } from './features/rewards/xpEngine';
+import { deriveTotalXp, deriveLevel, evaluateBadges, computeFinishXpEvents, sumXpForAdventure } from './features/rewards/xpEngine';
+import { loadModel, wasModelCached } from './features/identify/inferenceClient';
 import { Navbar } from './app/Navbar';
 import { QuestSetup } from './features/quest/QuestSetup';
 import { WalkActive } from './features/walk/WalkActive';
@@ -33,6 +34,20 @@ export const App: React.FC = () => {
   }, []);
 
   const isEffectiveOffline = systemOffline || isSimulatedOffline;
+  const isStartingRef = useRef(false);
+  const isFinishingRef = useRef(false);
+
+  // On launch: load the AI model from the browser cache if it was downloaded before,
+  // and resume an unfinished adventure (the OS may have killed the PWA while walking).
+  useEffect(() => {
+    if (wasModelCached()) loadModel();
+    getResumableAdventure().then((adv) => {
+      if (adv) {
+        setActiveAdventure(adv);
+        setCurrentView('walk');
+      }
+    });
+  }, []);
 
   // Reactive DB queries
   const adventures = useLiveQuery(() => db.adventures.toArray(), []) || [];
@@ -40,80 +55,72 @@ export const App: React.FC = () => {
   const xpEvents = useLiveQuery(() => db.xp_events.toArray(), []) || [];
   const badgeUnlocks = useLiveQuery(() => db.badge_unlocks.toArray(), []) || [];
 
+  const finishedDiscoveries = useMemo(
+    () => discoveries.filter((d) => d.adventureId === finishedAdventure?.id),
+    [discoveries, finishedAdventure]
+  );
+
   const totalXp = deriveTotalXp(xpEvents);
   const levelInfo = deriveLevel(totalXp);
 
   // Start a new adventure
   const handleStartQuest = async (mood: Mood, difficulty: Difficulty, minutes: PlannedMinutes) => {
-    const questItems = generateQuest(mood, difficulty, minutes);
-    const newAdventure: Adventure = {
-      id: 'adv_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now(),
-      startedAt: Date.now(),
-      mood,
-      difficulty,
-      plannedMinutes: minutes,
-      distanceM: 0,
-      wasOffline: isEffectiveOffline,
-      phoneChecks: 0,
-      quest: questItems,
-    };
+    if (isStartingRef.current) return;
+    isStartingRef.current = true;
+    try {
+      const newAdventure: Adventure = {
+        id: uid('adv'),
+        startedAt: Date.now(),
+        mood,
+        difficulty,
+        plannedMinutes: minutes,
+        distanceM: 0,
+        // Real connectivity only - the demo "simulate airplane" toggle must not earn the offline badge
+        wasOffline: !navigator.onLine,
+        phoneChecks: 0,
+        quest: generateQuest(mood, difficulty, minutes),
+      };
 
-    await db.adventures.add(newAdventure);
-    await logXpEvent(newAdventure.id, 'start_adventure', 10);
+      await db.adventures.add(newAdventure);
+      await logXpEvent(newAdventure.id, 'start_adventure', 10);
 
-    setActiveAdventure(newAdventure);
-    setCurrentView('walk');
+      setActiveAdventure(newAdventure);
+      setCurrentView('walk');
+    } finally {
+      isStartingRef.current = false;
+    }
   };
 
-  // Finish Walk
+  // Finish walk: everything that earns XP goes through the ledger so levels and the recap always agree
   const handleFinishWalk = async (updated: Adventure) => {
-    // 1. Calculate XP for completed challenges and distance
-    let earnedThisWalk = 10; // Starting XP
-    const completedChallenges = updated.quest.filter((q) => q.done).length;
-    const challengeXp = completedChallenges * 20;
-    earnedThisWalk += challengeXp;
+    if (isFinishingRef.current) return;
+    isFinishingRef.current = true;
+    try {
+      const durationMinutes = Math.round(((updated.endedAt || Date.now()) - updated.startedAt) / 60000);
+      await db.adventures.put(updated);
+      await logXpEvents(updated.id, computeFinishXpEvents({ quest: updated.quest, distanceM: updated.distanceM, durationMinutes }));
 
-    // +50 XP for finishing quest
-    earnedThisWalk += 50;
-    await logXpEvent(updated.id, 'finish_quest', 50);
+      // Read fresh data from the DB (React state may be one render behind)
+      const [allAdventures, allDiscoveries, allBadges, allXp] = await Promise.all([
+        db.adventures.toArray(),
+        db.discoveries.toArray(),
+        db.badge_unlocks.toArray(),
+        db.xp_events.toArray(),
+      ]);
 
-    // Distance XP (every 500m -> +10 XP)
-    const distanceSteps = Math.floor(updated.distanceM / 500);
-    if (distanceSteps > 0) {
-      const distanceXp = Math.min(200, distanceSteps * 10);
-      earnedThisWalk += distanceXp;
-      await logXpEvent(updated.id, 'distance_steps', distanceXp);
+      const newBadges = evaluateBadges(allAdventures, allDiscoveries, allBadges.map((b) => b.badgeId));
+      for (const bId of newBadges) {
+        await db.badge_unlocks.put({ badgeId: bId, at: Date.now(), adventureId: updated.id });
+      }
+
+      setRecentXpEarned(sumXpForAdventure(allXp, updated.id));
+      setRecentBadgesUnlocked(newBadges);
+      setFinishedAdventure(updated);
+      setActiveAdventure(null);
+      setCurrentView('recap');
+    } finally {
+      isFinishingRef.current = false;
     }
-
-    // Time outdoors
-    const durationMinutes = Math.round(((updated.endedAt || Date.now()) - updated.startedAt) / 60000);
-    if (durationMinutes >= 60) {
-      earnedThisWalk += 75;
-      await logXpEvent(updated.id, 'time_60m', 75);
-    } else if (durationMinutes >= 30) {
-      earnedThisWalk += 30;
-      await logXpEvent(updated.id, 'time_30m', 30);
-    }
-
-    await db.adventures.put(updated);
-
-    // Evaluate badges
-    const existingIds = badgeUnlocks.map((b) => b.badgeId);
-    const newBadges = evaluateBadges([...adventures, updated], discoveries, existingIds);
-
-    for (const bId of newBadges) {
-      await db.badge_unlocks.add({
-        badgeId: bId,
-        at: Date.now(),
-        adventureId: updated.id,
-      });
-    }
-
-    setRecentXpEarned(earnedThisWalk);
-    setRecentBadgesUnlocked(newBadges);
-    setFinishedAdventure(updated);
-    setActiveAdventure(null);
-    setCurrentView('recap');
   };
 
   return (
@@ -143,7 +150,7 @@ export const App: React.FC = () => {
         {currentView === 'recap' && finishedAdventure && (
           <RecapView
             adventure={finishedAdventure}
-            discoveries={discoveries.filter((d) => d.adventureId === finishedAdventure.id)}
+            discoveries={finishedDiscoveries}
             unlockedBadgeIds={recentBadgesUnlocked}
             xpEarned={recentXpEarned}
             onGoHome={() => setCurrentView('rewards')}

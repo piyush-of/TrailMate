@@ -170,35 +170,66 @@ export const QUEST_TEMPLATES: QuestTemplate[] = [
   },
 ];
 
+function shuffle<T>(items: T[], rng: () => number): T[] {
+  const a = [...items];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 /**
- * Generates an outdoor quest checklist based on user inputs.
+ * Generates an outdoor quest checklist. Prefers templates matching both mood and difficulty,
+ * then tops up from mood-only, difficulty-only and finally everything - so the quest always
+ * has the requested number of unique items and still respects the chosen mood where possible.
  */
 export function generateQuest(
   mood: Mood,
   difficulty: Difficulty,
-  minutes: PlannedMinutes
+  minutes: PlannedMinutes,
+  rng: () => number = Math.random
 ): QuestItem[] {
-  // Determine item count based on duration
   const targetCount = minutes === 15 ? 3 : minutes === 30 ? 4 : 5;
 
-  // Filter templates matching criteria
-  const matching = QUEST_TEMPLATES.filter(
-    (t) => t.moods.includes(mood) && t.difficulties.includes(difficulty)
-  );
+  const tiers = [
+    QUEST_TEMPLATES.filter((t) => t.moods.includes(mood) && t.difficulties.includes(difficulty)),
+    QUEST_TEMPLATES.filter((t) => t.moods.includes(mood)),
+    QUEST_TEMPLATES.filter((t) => t.difficulties.includes(difficulty)),
+    QUEST_TEMPLATES,
+  ];
 
-  // Fallback to broader list if not enough matches
-  const pool = matching.length >= targetCount ? matching : QUEST_TEMPLATES;
+  const selected: QuestTemplate[] = [];
+  for (const tier of tiers) {
+    for (const t of shuffle(tier, rng)) {
+      if (selected.length >= targetCount) break;
+      if (!selected.includes(t)) selected.push(t);
+    }
+    if (selected.length >= targetCount) break;
+  }
 
-  // Shuffle pool
-  const shuffled = [...pool].sort(() => 0.5 - Math.random());
-  const selected = shuffled.slice(0, targetCount);
-
+  const stamp = Date.now();
   return selected.map((template, index) => ({
-    id: `quest_${Date.now()}_${index}`,
+    id: `quest_${stamp}_${index}`,
     text: template.text,
     type: template.type,
     done: false,
     targetCategory: template.targetCategory,
     targetLabelId: template.targetLabelId,
   }));
+}
+
+/**
+ * Ticks off at most ONE quest item for a confident discovery (prefers an exact label match,
+ * then a category match). One photo can no longer complete several quest items at once.
+ */
+export function applyDiscoveryToQuest(
+  items: QuestItem[],
+  discovery: { labelId?: string; category: string }
+): QuestItem[] {
+  const open = (q: QuestItem) => !q.done && (q.type === 'photo' || q.type === 'discover');
+  let idx = discovery.labelId ? items.findIndex((q) => open(q) && q.targetLabelId === discovery.labelId) : -1;
+  if (idx === -1) idx = items.findIndex((q) => open(q) && !q.targetLabelId && q.targetCategory === discovery.category);
+  if (idx === -1) return items;
+  return items.map((q, i) => (i === idx ? { ...q, done: true } : q));
 }

@@ -4,8 +4,11 @@ import {
   deriveLevel,
   evaluateBadges,
   calculateStreak,
+  computeFinishXpEvents,
+  sumXpForAdventure,
+  localDayKey,
 } from '../features/rewards/xpEngine';
-import { XpEvent, Adventure, Discovery } from '../types';
+import { XpEvent, Adventure, Discovery, QuestItem } from '../types';
 
 describe('XP & Rewards Engine', () => {
   it('sums append-only XP events and respects 500 XP daily cap', () => {
@@ -76,5 +79,50 @@ describe('XP & Rewards Engine', () => {
     ];
 
     expect(calculateStreak(adventures)).toBe(3);
+  });
+
+  it('applies the daily cap in time order, not array order', () => {
+    const day = new Date(2026, 9, 10, 12).getTime();
+    const events: XpEvent[] = [
+      { id: 'b', adventureId: 'a', kind: 'late', xp: 400, at: day + 2000, synced: 0 },
+      { id: 'a', adventureId: 'a', kind: 'early', xp: 400, at: day + 1000, synced: 0 },
+    ];
+    expect(deriveTotalXp(events)).toBe(500);
+    expect(deriveTotalXp([...events].reverse())).toBe(500);
+  });
+
+  it('uses the local calendar day for the cap boundary', () => {
+    const late = new Date(2026, 9, 10, 23, 59).getTime();
+    const early = new Date(2026, 9, 11, 0, 1).getTime();
+    expect(localDayKey(late)).not.toBe(localDayKey(early));
+  });
+
+  it('sums raw XP for one adventure', () => {
+    const ev: XpEvent[] = [
+      { id: '1', adventureId: 'a', kind: 'x', xp: 10, at: 1, synced: 0 },
+      { id: '2', adventureId: 'b', kind: 'x', xp: 99, at: 1, synced: 0 },
+    ];
+    expect(sumXpForAdventure(ev, 'a')).toBe(10);
+  });
+});
+
+describe('computeFinishXpEvents', () => {
+  const q = (done: boolean[]): QuestItem[] => done.map((d, i) => ({ id: String(i), text: '', type: 'walk', done: d }));
+  const total = (e: Array<{ xp: number }>) => e.reduce((s, x) => s + x.xp, 0);
+
+  it('awards quest-complete only when EVERY item is done', () => {
+    expect(computeFinishXpEvents({ quest: q([true, false]), distanceM: 0, durationMinutes: 10 }).some((e) => e.kind === 'quest_complete')).toBe(false);
+    expect(computeFinishXpEvents({ quest: q([true, true]), distanceM: 0, durationMinutes: 10 }).some((e) => e.kind === 'quest_complete')).toBe(true);
+  });
+
+  it('gives no quest XP for implausibly short adventures (tick-all-and-finish exploit)', () => {
+    expect(total(computeFinishXpEvents({ quest: q([true, true, true]), distanceM: 0, durationMinutes: 0 }))).toBe(0);
+  });
+
+  it('awards distance (per 500 m, capped) and time bonuses', () => {
+    const e = computeFinishXpEvents({ quest: [], distanceM: 1700, durationMinutes: 35 });
+    expect(e).toContainEqual({ kind: 'distance', xp: 30 });
+    expect(e).toContainEqual({ kind: 'time_30m', xp: 30 });
+    expect(computeFinishXpEvents({ quest: [], distanceM: 999999, durationMinutes: 61 }).find((x) => x.kind === 'distance')!.xp).toBe(200);
   });
 });

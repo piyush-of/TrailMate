@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { haversineDistance, isValidGpsPoint, calculateTrackDistance } from '../lib/geo';
+import { haversineDistance, isValidGpsPoint, calculateTrackDistance, minMovementFor } from '../lib/geo';
 
 describe('Geo & Distance Logic', () => {
   it('calculates Haversine distance accurately between known points', () => {
@@ -58,5 +58,11 @@ describe('Geo & Distance Logic', () => {
     const trackDist = calculateTrackDistance(points);
     expect(trackDist).toBeGreaterThan(50);
     expect(trackDist).toBeLessThan(60);
+  });
+
+  it('ignores jitter smaller than a fraction of the GPS accuracy', () => {
+    expect(minMovementFor(5)).toBe(3);      // floor of 3 m
+    expect(minMovementFor(10)).toBe(5);
+    expect(minMovementFor(30)).toBe(7.5);   // capped
   });
 });

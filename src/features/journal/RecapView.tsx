@@ -22,6 +22,7 @@ export const RecapView: React.FC<RecapViewProps> = ({
 }) => {
   const [breakdown, setBreakdown] = useState<TouchGrassScoreBreakdown | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const confettiFiredRef = useRef(false);
   const [isGeneratingCard, setIsGeneratingCard] = useState(false);
 
   const durationMin = Math.max(1, Math.round(((adventure.endedAt || Date.now()) - adventure.startedAt) / 60000));
@@ -35,7 +36,8 @@ export const RecapView: React.FC<RecapViewProps> = ({
     );
     setBreakdown(b);
 
-    if (b.score >= 60 || unlockedBadgeIds.length > 0) {
+    if (!confettiFiredRef.current && (b.score >= 60 || unlockedBadgeIds.length > 0)) {
+      confettiFiredRef.current = true;
       confetti({
         particleCount: 80,
         spread: 70,

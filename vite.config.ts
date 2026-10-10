@@ -8,7 +8,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg', 'labels/*', 'robots.txt'],
+      includeAssets: ['favicon.svg', 'labels/*'],
       manifest: {
         name: 'TrailMate - Outdoor Quest & AI Companion',
         short_name: 'TrailMate',
@@ -18,49 +18,22 @@ export default defineConfig({
         display: 'standalone',
         orientation: 'portrait',
         icons: [
-          {
-            src: 'pwa-192x192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: 'pwa-512x512.png',
-            sizes: '512x512',
-            type: 'image/png'
-          }
-        ]
+          { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
+          { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
+          { src: 'pwa-maskable-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+        ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,json}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/huggingface\.co\/.*/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'transformers-models-cache',
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 days
-              },
-              cacheableResponse: {
-                statuses: [0, 200]
-              }
-            }
-          }
-        ]
-      }
-    })
+        // App shell + the self-hosted ONNX runtime (.mjs/.wasm are emitted into assets/)
+        globPatterns: ['**/*.{js,mjs,wasm,css,html,ico,png,svg,json,webmanifest}'],
+        maximumFileSizeToCacheInBytes: 30 * 1024 * 1024,
+        navigateFallback: 'index.html',
+      },
+    }),
   ],
   resolve: {
-    alias: {
-      '@': path.resolve(__dirname, './src'),
-    },
+    alias: { '@': path.resolve(__dirname, './src') },
   },
-  server: {
-    port: 5173,
-    host: true
-  },
-  worker: {
-    format: 'es'
-  }
+  server: { port: 5173, host: true },
+  worker: { format: 'es' },
 });

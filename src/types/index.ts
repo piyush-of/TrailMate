@@ -84,34 +84,11 @@ export interface CampusLabel {
 
 export interface ClassificationResult {
   label: string;
+  labelId?: string;
   category: DiscoveryCategory;
   confidence: number;
   isConfident: boolean;
+  /** Why the result is not confident (only set when isConfident is false) */
+  reason?: 'low_confidence' | 'not_nature';
   alternatives?: Array<{ label: string; confidence: number }>;
 }
-
-export interface WorkerProgressMessage {
-  type: 'progress';
-  progress: number;
-  status: string;
-}
-
-export interface WorkerReadyMessage {
-  type: 'ready';
-}
-
-export interface WorkerResultMessage {
-  type: 'result';
-  result: ClassificationResult;
-}
-
-export interface WorkerErrorMessage {
-  type: 'error';
-  error: string;
-}
-
-export type WorkerMessage =
-  | WorkerProgressMessage
-  | WorkerReadyMessage
-  | WorkerResultMessage
-  | WorkerErrorMessage;
